@@ -69,4 +69,11 @@ venv.bak/
 .settings/
 
 # OS-specific files
-.DS_Store 
+.DS_Store
+
+# LangGraph Studio
+.langgraph_api/
+
+# Node/Frontend (if ever used)
+node_modules/
+dist/ 

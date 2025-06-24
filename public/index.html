@@ -43,6 +43,7 @@
         });
 
         function addMessage(text, sender) {
+            console.log(`[DEBUG] Adding message to chat: sender=${sender}, text=`, text);
             const messageElement = document.createElement('div');
             messageElement.classList.add('message', sender === 'user' ? 'user-message' : 'ai-message');
             messageElement.textContent = text;
@@ -91,10 +92,6 @@
                                 currentText += parsed.content;
                                 aiMessageElement.textContent = currentText;
                                 chatBox.scrollTop = chatBox.scrollHeight;
-                            } else if (parsed.type === 'tool_end' && parsed.output) {
-                                addMessage(parsed.output, 'ai');
-                            } else if (parsed.type === 'final' && parsed.output) {
-                                addMessage(parsed.output, 'ai');
                             }
                         } catch (e) {
                             console.error('Error parsing stream data:', data, e);

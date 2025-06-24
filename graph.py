@@ -19,11 +19,20 @@ load_dotenv()
 def log(msg):
     print(f"[GRAPH LOG] {msg}")
 
+# Post-processing function to extract only the user-friendly question
+def extract_question(text):
+    import re
+    # Remove all code blocks (```...```), aggressively
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Return the last non-empty line
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
 llm = ChatOpenAI(model="gpt-4o-2024-05-13")
 
 MISSING_FIELDS_PROMPT = ChatPromptTemplate.from_messages(
     [
-        ("system", "You are a helpful assistant. Your role is to ask the user for the information you are missing. Based on the user's request and the missing fields, generate a single, user-friendly question to ask the user. For example, if 'user_email' is missing, ask 'What is your email address?'. If multiple fields are missing, ask for them all in one question."),
+        ("system", "You are a helpful assistant. Ask the user for the missing fields. ONLY return the question, no preamble, no code blocks, no extra text."),
         MessagesPlaceholder(variable_name="messages"),
         ("user", "I am missing the following fields: {missing_fields}. Please generate a question to ask the user for this information."),
     ]
@@ -40,6 +49,7 @@ class AgentState(BaseModel):
     document_id: Optional[str] = Field(None, description="The ID of the document to be analyzed.")
     analysis_result: Optional[str] = Field(None, description="The result of the analysis from start_analysis.")
     next_node: Optional[str] = Field(None, description="The next node to execute.")
+    step_2_done: Optional[bool] = False
 
 # Define response schemas for StructuredOutputParser
 response_schemas = [
@@ -48,69 +58,57 @@ response_schemas = [
 ]
 parser = StructuredOutputParser.from_response_schemas(response_schemas)
 
-def orchestrator(state: AgentState) -> dict:
-    log(f"[orchestrator] user_email={state.user_email}, document_id={state.document_id}, analysis_result={state.analysis_result}")
-    if not state.user_email or not state.document_id:
-        log("[orchestrator] Routing to start_analysis")
-        return {"next_node": "start_analysis"}
-    elif not state.analysis_result:
-        log("[orchestrator] Routing to performs_step_2")
-        return {"next_node": "performs_step_2"}
-    else:
-        log("[orchestrator] Routing to end")
-        return {"next_node": "end"}
-
-def validation_and_processing_node(state: AgentState) -> dict:
-    log(f"[validation_and_processing_node] Entered with state: user_email={state.user_email}, document_id={state.document_id}, analysis_result={state.analysis_result}, next_node={state.next_node}")
-    last_message = state.messages[-1]
-
-    # If the last message is from the user, try to process it for missing info
-    if isinstance(last_message, HumanMessage):
-        prompt = (
-            f"You are an expert at extracting information.\n"
-            f"Extract 'user_email' and 'document_id' from the user's message:\n\n"
-            f"'{last_message.content}'\n\n"
-            f"Return a JSON object with the extracted values. If a value is not found, do not include its key."
-        )
-        response = llm.invoke(prompt)
-        try:
-            extracted_data = parser.parse(response.content)
-        except Exception as e:
-            log(f"[validation_and_processing_node] Failed to parse extracted data: {response.content} | Error: {e}")
-            extracted_data = {}
-        log(f"[validation_and_processing_node] Extracted data from user: {extracted_data}")
-        if extracted_data:
-            return extracted_data
-
-    # Validation logic (runs after any extracted fields have been merged)
-    next_node = state.next_node
-    if not next_node:
-        log("[validation_and_processing_node] No next_node set, re-running orchestrator.")
+def extract_fields(state, missing_fields):
+    conversation = "\n".join(f"{type(m).__name__}: {getattr(m, 'content', m)}" for m in state.messages)
+    prompt = (
+        f"You are an expert at extracting information.\n"
+        f"Here is the conversation so far:\n{conversation}\n\n"
+        f"Extract the following fields if present: {', '.join(missing_fields)}. "
+        f"Return a JSON object with the extracted values. If a value is not found, do not include its key."
+    )
+    response = llm.invoke(prompt)
+    try:
+        return parser.parse(response.content)
+    except Exception:
         return {}
 
+def ask_for_missing_fields(state, missing_fields):
+    prompt = MISSING_FIELDS_PROMPT.format(
+        messages=state.messages,
+        missing_fields=", ".join(missing_fields),
+    )
+    response = llm.invoke(prompt)
+    question = extract_question(response.content)
+    state.messages.append(AIMessage(content=question))
+    raise GraphInterrupt()
+
+def orchestrator(state: AgentState) -> dict:
+    if not state.user_email or not state.document_id:
+        return {"next_node": "start_analysis"}
+    if not state.analysis_result:
+        return {"next_node": "start_analysis"}
+    if not getattr(state, "step_2_done", False):
+        return {"next_node": "performs_step_2"}
+    return {"next_node": "end"}
+
+def validation_and_processing_node(state: AgentState) -> dict:
+    next_node = state.next_node
+    if not next_node:
+        return {"messages": state.messages}
     if next_node == "end":
-        log("[validation_and_processing_node] Reached end node.")
         return {"messages": [AIMessage(content="Analysis complete. Thank you!")]}
-
     required_fields = NODE_REQUIREMENTS.get(next_node, [])
-    missing_fields = [field for field in required_fields if not getattr(state, field, None)]
-
+    missing_fields = [f for f in required_fields if not getattr(state, f, None)]
     if missing_fields:
-        log(f"[validation_and_processing_node] Missing fields for node '{next_node}': {missing_fields}")
-        # Ask the user for the missing information
-        prompt = MISSING_FIELDS_PROMPT.format(
-            messages=state.messages,
-            missing_fields=", ".join(missing_fields),
-        )
-        response = llm.invoke(prompt)
-        # Add the AI's question to the message list and interrupt
-        state.messages.append(response)
-        log(f"[validation_and_processing_node] Interrupting to ask user: {response.content}")
-        raise GraphInterrupt()
-
-    # If all fields are present, proceed
-    log(f"[validation_and_processing_node] All required fields present for node '{next_node}'. Proceeding.")
-    return {}
+        extracted = extract_fields(state, missing_fields)
+        for k, v in extracted.items():
+            setattr(state, k, v)
+        still_missing = [f for f in required_fields if not getattr(state, f, None)]
+        if extracted:
+            return extracted
+        if still_missing:
+            ask_for_missing_fields(state, still_missing)
+    return {"messages": state.messages}
 
 def route_after_validation(state: AgentState) -> str:
     log(f"[route_after_validation] next_node={state.next_node}")
@@ -129,19 +127,20 @@ def route_after_validation(state: AgentState) -> str:
     return state.next_node
 
 def start_analysis(state: AgentState) -> dict:
-    log(f"[start_analysis] user_email={state.user_email}, document_id={state.document_id}")
-    email = state.user_email
-    doc_id = state.document_id
-    result = f"Analysis of document '{doc_id}' for user '{email}' is complete. The result is 42."
-    log(f"[start_analysis] Result: {result}")
-    return {"analysis_result": result, "messages": [AIMessage(content=result)]}
+    processing_msg = AIMessage(content="Processing analysis...")
+    result = f"Analysis of document '{state.document_id}' for user '{state.user_email}' is complete. "
+    return {
+        "analysis_result": result,
+        "messages": [processing_msg, AIMessage(content=result)]
+    }
 
 def performs_step_2(state: AgentState) -> dict:
-    log(f"[performs_step_2] analysis_result={state.analysis_result}")
-    analysis_result = state.analysis_result
-    result = f"Step 2 processed the analysis result: '{analysis_result}'. This is the final step."
-    log(f"[performs_step_2] Result: {result}")
-    return {"messages": [AIMessage(content=result)]}
+    processing_msg = AIMessage(content="Running step 2...")
+    result = f"Step 2 processed the analysis result: '{state.analysis_result}'. This is the final step."
+    return {
+        "messages": [processing_msg, AIMessage(content=result)],
+        "step_2_done": True
+    }
 
 # Define the graph
 builder = StateGraph(AgentState)
@@ -168,5 +167,7 @@ builder.add_conditional_edges(
 builder.add_edge("start_analysis", "orchestrator")
 builder.add_edge("performs_step_2", "orchestrator")
 
-memory = MemorySaver()
-graph = builder.compile(checkpointer=memory) 
+# Uncomment the next two lines to serve the app at index.html
+# memory = MemorySaver()
+# graph = builder.compile(checkpointer=memory) 
+graph = builder.compile() 
