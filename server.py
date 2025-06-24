@@ -42,7 +42,32 @@ async def stream_events(thread_id: str, input_message: str):
         elif event_type == "on_tool_start":
             yield f"data: {json.dumps({'type': 'tool_start', 'tool': event['name']})}\n\n"
         elif event_type == "on_tool_end":
-            yield f"data: {json.dumps({'type': 'tool_end', 'tool': event['name'], 'output': event['data']['output']})}\n\n"
+            output = event['data']['output']
+            # Try to extract the last AI message content if present
+            message_content = (
+                output.get('messages', [{}])[-1].get('content')
+                if isinstance(output, dict) and 'messages' in output and output['messages']
+                and isinstance(output['messages'][-1], dict)
+                else output if isinstance(output, str) else None
+            )
+            if message_content:
+                yield f"data: {json.dumps({'type': 'tool_end', 'tool': event['name'], 'output': message_content})}\n\n"
+
+    # After the event loop, send the last AI message in the state (if any)
+    final_state = graph.invoke(initial_input, config=config)
+    if 'messages' in final_state and final_state['messages']:
+        ai_message_content = None
+        for msg in reversed(final_state['messages']):
+            # If using dicts
+            if isinstance(msg, dict) and msg.get('type', '').lower() == 'ai':
+                ai_message_content = msg.get('content')
+                break
+            # If using AIMessage objects
+            elif hasattr(msg, 'type') and getattr(msg, 'type', '').lower() == 'ai':
+                ai_message_content = getattr(msg, 'content', None)
+                break
+        if ai_message_content:
+            yield f"data: {json.dumps({'type': 'final', 'output': ai_message_content})}\n\n"
 
     yield "data: [DONE]\n\n"
 

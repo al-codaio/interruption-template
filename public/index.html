@@ -91,6 +91,10 @@
                                 currentText += parsed.content;
                                 aiMessageElement.textContent = currentText;
                                 chatBox.scrollTop = chatBox.scrollHeight;
+                            } else if (parsed.type === 'tool_end' && parsed.output) {
+                                addMessage(parsed.output, 'ai');
+                            } else if (parsed.type === 'final' && parsed.output) {
+                                addMessage(parsed.output, 'ai');
                             }
                         } catch (e) {
                             console.error('Error parsing stream data:', data, e);
