@@ -16,9 +16,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def log(msg):
-    print(f"[GRAPH LOG] {msg}")
-
 # Post-processing function to extract only the user-friendly question
 def extract_question(text):
     import re
@@ -111,19 +108,15 @@ def validation_and_processing_node(state: AgentState) -> dict:
     return {"messages": state.messages}
 
 def route_after_validation(state: AgentState) -> str:
-    log(f"[route_after_validation] next_node={state.next_node}")
     # If validation decided we are done, just end.
     if not state.next_node or state.next_node == "end":
-        log("[route_after_validation] Routing to end")
         return "end"
     
     # Check if we have the required fields for the next node. If not, re-run orchestrator.
     required_fields = NODE_REQUIREMENTS.get(state.next_node, [])
     if any(not getattr(state, field, None) for field in required_fields):
-        log(f"[route_after_validation] Missing required fields for node '{state.next_node}', routing to orchestrator")
         return "orchestrator"
         
-    log(f"[route_after_validation] Routing to {state.next_node}")
     return state.next_node
 
 def start_analysis(state: AgentState) -> dict:
