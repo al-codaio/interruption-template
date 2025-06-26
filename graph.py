@@ -167,7 +167,8 @@ builder.add_conditional_edges(
 builder.add_edge("start_analysis", "orchestrator")
 builder.add_edge("performs_step_2", "orchestrator")
 
-# Uncomment the next two lines to serve the app at index.html
-# memory = MemorySaver()
-# graph = builder.compile(checkpointer=memory) 
-graph = builder.compile() 
+memory = MemorySaver()
+graph = builder.compile(checkpointer=memory) 
+
+# Uncomment the next line below and comment out the two lines above to serve in langraph studio
+#graph = builder.compile() 
